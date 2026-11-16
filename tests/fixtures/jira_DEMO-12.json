@@ -1,0 +1,24 @@
+{
+  "key": "DEMO-12",
+  "fields": {
+    "summary": "Add user search to admin console",
+    "description": "Admins need to find users by email in the admin console.\n\nRequirements:\n1. Only admins can use search. Non-admins get a PermissionError.\n2. Match email substring, case-insensitive.\n3. Return 20 results per page. Page numbers start at 1.\n4. An empty search term is rejected with 'term required'.\n5. Never build SQL from user input.",
+    "issuetype": {"name": "Story"},
+    "status": {"name": "In Progress"},
+    "comment": {
+      "comments": [
+        {"author": {"displayName": "Priya (PM)"}, "created": "2026-11-02T10:00:00.000+0000",
+         "body": "Search should also work on partial emails like 'sam@'."},
+        {"author": {"displayName": "Dev Lead"}, "created": "2026-11-05T09:12:00.000+0000",
+         "body": "Layout screenshot attached. Ignore the old export button."}
+      ]
+    },
+    "issuelinks": [
+      {"type": {"name": "Blocks"},
+       "outwardIssue": {"key": "DEMO-7", "fields": {"summary": "Admin role check middleware"}}}
+    ],
+    "attachment": [
+      {"id": "10001", "filename": "search-layout.png", "mimeType": "image/png", "size": 240000}
+    ]
+  }
+}

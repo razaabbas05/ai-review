@@ -1,0 +1,31 @@
+{
+  "summary": "Adds an email search function with pagination. It has a missing admin check, SQL built from user input, an off-by-one in pagination, and an unguarded index into an empty result. Do not merge until the security items are fixed.",
+  "requirements": [
+    {"id": "R1", "text": "Only admins can use search", "status": "not_met", "evidence": "app/users.py:12 has no role check"},
+    {"id": "R2", "text": "Case-insensitive email substring match", "status": "partly_met", "evidence": "app/users.py:19 uses LOWER(email) LIKE, but the value is injected into SQL"},
+    {"id": "R3", "text": "20 results per page, page numbers start at 1", "status": "not_met", "evidence": "app/users.py:16 uses page * PAGE_SIZE, so page 1 skips the first 20 rows"},
+    {"id": "R4", "text": "Empty search term rejected with 'term required'", "status": "partly_met", "evidence": "app/users.py:14 only checks for None, so '' passes"},
+    {"id": "R5", "text": "Never build SQL from user input", "status": "not_met", "evidence": "app/users.py:19 f-string interpolation of term"}
+  ],
+  "new_findings": [
+    {"path": "app/users.py", "line": 19, "severity": "Blocker", "category": "security",
+     "title": "SQL injection via search term",
+     "body": "term is interpolated into the query string. Use a parameter placeholder, e.g. conn.execute(sql, (f\"%{term.lower()}%\", PAGE_SIZE, offset))."},
+    {"path": "app/users.py", "line": 12, "severity": "High", "category": "requirements",
+     "title": "No admin check on search_users",
+     "body": "The ticket requires admin-only search. Accept the requester's role and raise PermissionError when it is not 'admin'."},
+    {"path": "app/users.py", "line": 16, "severity": "High", "category": "bug",
+     "title": "Off-by-one pagination offset",
+     "body": "offset = page * PAGE_SIZE makes page 1 skip the first 20 results. Use (page - 1) * PAGE_SIZE."},
+    {"path": "app/users.py", "line": 14, "severity": "Medium", "category": "bug",
+     "title": "Empty term is not rejected",
+     "body": "Use `if not term:` so that an empty string raises 'term required'."},
+    {"path": "app/users.py", "line": 23, "severity": "Medium", "category": "bug",
+     "title": "IndexError when there are no matches",
+     "body": "rows[0] fails on an empty result. Return None when rows is empty."},
+    {"path": "app/users.py", "line": 99, "severity": "Low", "category": "code quality",
+     "title": "Example finding outside the diff",
+     "body": "This line is not in the diff, so it should be listed in the summary, not posted inline."}
+  ],
+  "previous_findings": []
+}

@@ -1,0 +1,22 @@
+diff --git a/app/users.py b/app/users.py
+index 819a4b4..e610de9 100644
+--- a/app/users.py
++++ b/app/users.py
+@@ -7,3 +7,17 @@ PAGE_SIZE = 20
+ def list_users(conn: sqlite3.Connection):
+     """Return every user, oldest first."""
+     return conn.execute("SELECT id, email, role FROM users ORDER BY id").fetchall()
++
++
++def search_users(conn: sqlite3.Connection, term: str, requester_role: str, page: int = 1):
++    """Admin-only search by email substring, 20 per page, page is 1-based."""
++    if requester_role != "admin":
++        raise PermissionError("admin only")
++    if not term:
++        raise ValueError("term required")
++    offset = (page - 1) * PAGE_SIZE
++    rows = conn.execute(
++        "SELECT id, email, role FROM users WHERE LOWER(email) LIKE ? ORDER BY id LIMIT ? OFFSET ?",
++        (f"%{term.lower()}%", PAGE_SIZE, offset),
++    ).fetchall()
++    return {"results": rows, "first_email": rows[0][1] if rows else None}

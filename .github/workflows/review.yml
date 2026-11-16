@@ -1,0 +1,72 @@
+name: AI Review (reusable)
+
+on:
+  workflow_call:
+
+concurrency:
+  group: ai-review-${{ github.repository }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: write
+    steps:
+      # The app code, at the PR's head commit, with full history so git can diff against the base.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      # The review tooling. The repo is public, so the default token works. A private repo needs AI_REVIEW_REPO_TOKEN.
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/ai-review
+          token: ${{ secrets.AI_REVIEW_REPO_TOKEN || github.token }}
+          path: .ai-review
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Find Jira key
+        id: jira
+        env:
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          KEY=$(printf '%s\n' "$BRANCH" | grep -oE '[A-Z][A-Z0-9]+-[0-9]+' | head -1 || true)
+          if [ -z "$KEY" ]; then
+            KEY=$(printf '%s\n' "$TITLE" | grep -oE '[A-Z][A-Z0-9]+-[0-9]+' | head -1 || true)
+          fi
+          echo "key=$KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch Jira context
+        # Non-fatal: if Jira is down or the key is wrong, the review runs without requirements.
+        if: steps.jira.outputs.key != ''
+        continue-on-error: true
+        env:
+          JIRA_KEY: ${{ steps.jira.outputs.key }}
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+        run: python3 .ai-review/scripts/jira_context.py
+
+      - name: Run AI review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python3 .ai-review/scripts/review.py

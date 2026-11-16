@@ -1,0 +1,17 @@
+# Copy this into the app repo as .github/workflows/ai-review.yml.
+# Replace YOUR_GITHUB_USERNAME with the account that owns the ai-review repo.
+name: AI Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+jobs:
+  review:
+    if: github.event.pull_request.draft == false && !contains(github.event.pull_request.labels.*.name, 'skip-ai-review')
+    uses: YOUR_GITHUB_USERNAME/ai-review/.github/workflows/review.yml@main
+    secrets: inherit
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: write
