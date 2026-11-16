@@ -22,7 +22,7 @@ tests/              offline unit tests and fixtures
 ## Run the tests (no accounts needed)
 
 ```bash
-python3 -m unittest discover -s tests -v
+python3 -m python3 -m unittest discover -s tests -v
 ```
 
 ## Dry run of the whole pipeline (no GitHub, no API calls)
