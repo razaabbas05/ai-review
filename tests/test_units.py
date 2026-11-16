@@ -6,6 +6,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -91,6 +92,24 @@ class ParseTests(unittest.TestCase):
         self.assertTrue(out["new_findings"][0]["placed"])
         self.assertFalse(out["new_findings"][1]["placed"])      # line 99 is outside the diff
         self.assertEqual(out["requirements"][0]["status"], "cant_verify")
+
+
+class ClaudeCommandTests(unittest.TestCase):
+    def model_used(self, env):
+        with patch.dict("os.environ", env, clear=True):
+            with patch("review.subprocess.run") as run:
+                run.return_value.returncode = 0
+                run.return_value.stdout = json.dumps({"result": "ok"})
+                review.run_claude("prompt", "system")
+                command = run.call_args.args[0]
+        return command[command.index("--model") + 1]
+
+    def test_defaults_to_haiku_5_5(self):
+        self.assertEqual(self.model_used({}), "claude-haiku-5-5")
+
+    def test_model_can_be_overridden(self):
+        self.assertEqual(self.model_used({"CLAUDE_MODEL": "claude-sonnet-5-5"}),
+                         "claude-sonnet-5-5")
 
 
 class StateTests(unittest.TestCase):

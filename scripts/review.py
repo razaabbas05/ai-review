@@ -57,7 +57,8 @@ def compute_diff(prior):
 
 
 def run_claude(prompt, system):
-    cmd = ["claude", "-p", "--output-format", "json",
+    model = os.environ.get("CLAUDE_MODEL", "claude-haiku-5-5")
+    cmd = ["claude", "-p", "--model", model, "--output-format", "json",
            "--append-system-prompt", system,
            "--allowedTools", "Read", "Grep", "Glob",
            "--disallowedTools", "Bash", "Edit", "Write", "WebFetch", "WebSearch"]
