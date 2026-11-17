@@ -176,6 +176,32 @@ class PublishTests(unittest.TestCase):
         self.assertNotIn("/reviews", out)
         self.assertIn('"conclusion": "success"', out)
 
+    def test_missing_comment_line_does_not_abort_publishing(self):
+        result = {"summary": "s", "requirements": [],
+                  "new_findings": [{"path": "app/users.py", "line": 2, "title": "T", "body": "B",
+                                    "severity": "High", "category": "security", "placed": True}],
+                  "previous_findings": []}
+        calls = []
+
+        def fake_gh_api(path, method="GET", payload=None, paginate=False):
+            calls.append((path, method, payload, paginate))
+            if path == "repos/me/sample/pulls/1/reviews":
+                return {"id": 77}
+            if path == "repos/me/sample/pulls/1/reviews/77/comments":
+                return [
+                    {"id": 123, "path": "app/users.py", "original_line": 2},
+                    {"id": 124, "path": "app/users.py"},
+                ]
+            return {}
+
+        with patch.object(post, "DRY_RUN", False), patch.object(post, "gh_api", side_effect=fake_gh_api):
+            out = self.run_publish(result, self.ctx())
+
+        self.assertIn("without a usable path, line, or ID", out)
+        summary_call = next(c for c in calls if c[0] == "repos/me/sample/issues/1/comments")
+        self.assertIn('"comment_id":123', summary_call[2]["body"])
+        self.assertTrue(any(c[0] == "repos/me/sample/check-runs" for c in calls))
+
 
 if __name__ == "__main__":
     unittest.main()

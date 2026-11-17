@@ -117,7 +117,20 @@ def publish(result, ctx):
         })
         if not DRY_RUN and review.get("id"):
             posted = gh_api(f"repos/{repo}/pulls/{pr}/reviews/{review['id']}/comments", paginate=True) or []
-            ids = {(c["path"], c["line"]): c["id"] for c in posted}
+            ids = {}
+            for comment in posted:
+                if not isinstance(comment, dict):
+                    print("Warning: GitHub returned a review comment in an unexpected format; its ID will not be saved.")
+                    continue
+                path = comment.get("path")
+                line = comment.get("line")
+                if line is None:
+                    line = comment.get("original_line")
+                comment_id = comment.get("id")
+                if not isinstance(path, str) or not isinstance(line, int) or not isinstance(comment_id, int):
+                    print("Warning: GitHub returned a review comment without a usable path, line, or ID; its ID will not be saved.")
+                    continue
+                ids[(path, line)] = comment_id
             for f, _ in inline:
                 f["comment_id"] = ids.get((f["path"], f["line"]))
 
