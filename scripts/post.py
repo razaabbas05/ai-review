@@ -35,6 +35,24 @@ def inline_body(f):
     return f"**[{f['severity']} · {f['category']}]** {f['title']}\n\n{f['body']}"
 
 
+def match_comment_id(finding, comments, original=False):
+    """Match content as well as location: multiple findings can share a line."""
+    header = inline_body({**finding, "body": ""}).strip()
+    matches = set()
+    for comment in comments:
+        if not isinstance(comment, dict) or comment.get("in_reply_to_id"):
+            continue
+        line = comment.get("original_line") if original else comment.get("line")
+        if line is None:
+            line = comment.get("original_line")
+        body = comment.get("body") or ""
+        if (comment.get("path") == finding["path"] and line == finding["line"]
+                and body.split("\n", 1)[0] == header
+                and type(comment.get("id")) is int):
+            matches.add(comment["id"])
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
 def build_summary(result, ctx, open_findings, resolved_count, state):
     lines = ["## 🤖 AI review", ""]
     if ctx.get("jira_note"):
@@ -79,7 +97,15 @@ def publish(result, ctx):
     """result: validated review output. ctx: repo, pr, head_sha, range, mode, summary_id, prior, limit,
     diff_lines, too_large, jira_note."""
     repo, pr, head = ctx["repo"], ctx["pr"], ctx["head_sha"]
-    prior_findings = (ctx.get("prior") or {}).get("findings", [])
+    prior_findings = [dict(f) for f in (ctx.get("prior") or {}).get("findings", [])]
+    missing = [f for f in prior_findings
+               if f.get("inline") and f.get("status") == "open" and not f.get("comment_id")]
+    if missing and not DRY_RUN:
+        comments = gh_api(f"repos/{repo}/pulls/{pr}/comments", paginate=True) or []
+        bot_comments = [c for c in comments if isinstance(c, dict)
+                        and (c.get("user") or {}).get("login") == "github-actions[bot]"]
+        for f in missing:
+            f["comment_id"] = match_comment_id(f, bot_comments, original=True)
     resolved_now = {p["id"] for p in result.get("previous_findings", []) if p.get("status") == "resolved"}
 
     # 1. Carry earlier findings forward; mark resolved ones and edit their inline comments.
@@ -116,23 +142,14 @@ def publish(result, ctx):
                          for f, nf in inline],
         })
         if not DRY_RUN and review.get("id"):
-            posted = gh_api(f"repos/{repo}/pulls/{pr}/reviews/{review['id']}/comments", paginate=True) or []
-            ids = {}
-            for comment in posted:
-                if not isinstance(comment, dict):
-                    print("Warning: GitHub returned a review comment in an unexpected format; its ID will not be saved.")
-                    continue
-                path = comment.get("path")
-                line = comment.get("line")
-                if line is None:
-                    line = comment.get("original_line")
-                comment_id = comment.get("id")
-                if not isinstance(path, str) or not isinstance(line, int) or not isinstance(comment_id, int):
-                    print("Warning: GitHub returned a review comment without a usable path, line, or ID; its ID will not be saved.")
-                    continue
-                ids[(path, line)] = comment_id
+            # The review-specific endpoint may only return diff positions, not line numbers.
+            posted = gh_api(f"repos/{repo}/pulls/{pr}/comments", paginate=True) or []
+            posted = [c for c in posted if isinstance(c, dict)
+                      and c.get("pull_request_review_id") == review["id"]]
             for f, _ in inline:
-                f["comment_id"] = ids.get((f["path"], f["line"]))
+                f["comment_id"] = match_comment_id(f, posted)
+                if f["comment_id"] is None:
+                    print(f"Warning: Could not uniquely match GitHub comment for {f['id']}; its ID will not be saved.")
 
     # 3. Summary comment: edit the existing one, or create it on the first run.
     open_findings = [f for f in findings if f["status"] == "open"]

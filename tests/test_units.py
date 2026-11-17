@@ -187,20 +187,63 @@ class PublishTests(unittest.TestCase):
             calls.append((path, method, payload, paginate))
             if path == "repos/me/sample/pulls/1/reviews":
                 return {"id": 77}
-            if path == "repos/me/sample/pulls/1/reviews/77/comments":
+            if path == "repos/me/sample/pulls/1/comments":
                 return [
-                    {"id": 123, "path": "app/users.py", "original_line": 2},
-                    {"id": 124, "path": "app/users.py"},
+                    {"id": 123, "path": "app/users.py", "original_line": 2,
+                     "pull_request_review_id": 77,
+                     "body": post.inline_body(result["new_findings"][0])},
+                    {"id": 124, "path": "app/users.py", "pull_request_review_id": 77},
+                    {"id": 125, "path": "app/users.py", "line": 2,
+                     "pull_request_review_id": 76,
+                     "body": post.inline_body(result["new_findings"][0])},
                 ]
             return {}
 
         with patch.object(post, "DRY_RUN", False), patch.object(post, "gh_api", side_effect=fake_gh_api):
             out = self.run_publish(result, self.ctx())
 
-        self.assertIn("without a usable path, line, or ID", out)
+        self.assertNotIn("Warning", out)
         summary_call = next(c for c in calls if c[0] == "repos/me/sample/issues/1/comments")
         self.assertIn('"comment_id":123', summary_call[2]["body"])
         self.assertTrue(any(c[0] == "repos/me/sample/check-runs" for c in calls))
+
+    def test_same_line_findings_keep_distinct_ids(self):
+        first = {"path": "app/users.py", "line": 12, "severity": "High",
+                 "category": "bug", "title": "Permission", "body": "details"}
+        second = {**first, "title": "Validation"}
+        comments = [
+            {"id": 101, "path": "app/users.py", "line": 12, "body": post.inline_body(first)},
+            {"id": 102, "path": "app/users.py", "line": 12, "body": post.inline_body(second)},
+        ]
+        self.assertEqual(post.match_comment_id(first, comments), 101)
+        self.assertEqual(post.match_comment_id(second, comments), 102)
+        self.assertIsNone(post.match_comment_id(first, comments + [{**comments[0], "id": 103}]))
+
+    def test_missing_prior_id_recovered_before_resolved_edit(self):
+        old = {"id": "F-1", "path": "app/users.py", "line": 12, "severity": "High",
+               "category": "bug", "title": "Permission", "status": "open",
+               "comment_id": None, "inline": True}
+        comment = {"id": 101, "path": old["path"], "line": None, "original_line": 12,
+                   "body": post.inline_body({**old, "body": "details"}),
+                   "user": {"login": "github-actions[bot]"}}
+        calls = []
+
+        def fake_api(path, method="GET", payload=None, paginate=False):
+            calls.append((path, method, payload))
+            if path == "repos/me/sample/pulls/1/comments":
+                return [comment, {**comment, "id": 102, "user": {"login": "someone"}}]
+            return {}
+
+        with patch.object(post, "DRY_RUN", False), patch.object(post, "gh_api", side_effect=fake_api):
+            self.run_publish({"previous_findings": [{"id": "F-1", "status": "resolved"}]},
+                             self.ctx(prior={"findings": [old]}, summary_id=42))
+        self.assertTrue(any(path.endswith("pulls/comments/101") and method == "PATCH"
+                            for path, method, _ in calls))
+        summary = next(payload["body"] for path, _, payload in calls
+                       if path.endswith("issues/comments/42"))
+        self.assertIn('"comment_id":101', summary)
+        self.assertIn('"status":"resolved"', summary)
+        self.assertIsNone(old["comment_id"])
 
 
 if __name__ == "__main__":
