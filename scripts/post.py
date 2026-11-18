@@ -64,6 +64,11 @@ def build_summary(result, ctx, open_findings, resolved_count, state):
                   "so it was not reviewed automatically. Split the PR or review it by hand."]
         return "\n".join(lines) + "\n\n" + render_state(state)
 
+    if ctx.get("incomplete"):
+        lines += ["**Review incomplete.** The last successfully reviewed commit has not changed.", ""]
+    if ctx.get("unchanged"):
+        lines += ["No code changes since the last review. Previous results retained.", ""]
+
     if result.get("summary"):
         lines += [result["summary"], ""]
 
@@ -97,6 +102,23 @@ def publish(result, ctx):
     """result: validated review output. ctx: repo, pr, head_sha, range, mode, summary_id, prior, limit,
     diff_lines, too_large, jira_note."""
     repo, pr, head = ctx["repo"], ctx["pr"], ctx["head_sha"]
+    prior = ctx.get("prior") or {}
+    skipped = ctx.get("too_large") or ctx.get("incomplete")
+    unchanged = ctx.get("unchanged")
+    summary_id = ctx.get("summary_id")
+    # Persist the exact model result before any review/comment mutation. A retry
+    # reuses this result instead of asking the model for a different set of findings.
+    if not skipped and not unchanged:
+        pending_ctx = {k: v for k, v in ctx.items() if k not in ("prior", "summary_id")}
+        journal = {**prior, "pending": {"result": result, "ctx": pending_ctx}}
+        journal_body = "## AI review\n\nPublishing review results; this run is not complete yet.\n\n" + render_state(journal)
+        if summary_id:
+            _call("PATCH", f"repos/{repo}/issues/comments/{summary_id}", {"body": journal_body})
+        else:
+            saved = _call("POST", f"repos/{repo}/issues/{pr}/comments", {"body": journal_body})
+            summary_id = saved.get("id")
+    if unchanged:
+        result = {**result, "new_findings": [], "previous_findings": []}
     prior_findings = [dict(f) for f in (ctx.get("prior") or {}).get("findings", [])]
     missing = [f for f in prior_findings
                if f.get("inline") and f.get("status") == "open" and not f.get("comment_id")]
@@ -133,12 +155,27 @@ def publish(result, ctx):
         findings.append(f)
 
     inline = [(f, nf) for f, nf in new if f["inline"]]
+    def marker(f):
+        return f"<!-- ai-review-finding: {head}:{f['id']} -->"
+
+    if inline and not DRY_RUN:
+        existing = gh_api(f"repos/{repo}/pulls/{pr}/comments", paginate=True) or []
+        for f, _ in inline:
+            matches = [c for c in existing if isinstance(c, dict)
+                       and (c.get("user") or {}).get("login") == "github-actions[bot]"
+                       and not c.get("in_reply_to_id")
+                       and c.get("commit_id") == head
+                       and marker(f) in (c.get("body") or "")
+                       and type(c.get("id")) is int]
+            if matches:
+                f["comment_id"] = matches[0]["id"]
+        inline = [(f, nf) for f, nf in inline if f["comment_id"] is None]
     if inline:
         review = _call("POST", f"repos/{repo}/pulls/{pr}/reviews", {
             "commit_id": head,
             "event": "COMMENT",  # never APPROVE or REQUEST_CHANGES: humans decide
             "body": "AI review: inline findings for this push. Summary is in the AI review comment.",
-            "comments": [{"path": f["path"], "line": f["line"], "side": "RIGHT", "body": inline_body(nf)}
+            "comments": [{"path": f["path"], "line": f["line"], "side": "RIGHT", "body": inline_body(nf) + "\n\n" + marker(f)}
                          for f, nf in inline],
         })
         if not DRY_RUN and review.get("id"):
@@ -153,15 +190,22 @@ def publish(result, ctx):
 
     # 3. Summary comment: edit the existing one, or create it on the first run.
     open_findings = [f for f in findings if f["status"] == "open"]
-    state = {"last_sha": head, "findings": findings}
+    state = {"last_sha": prior.get("last_sha") if skipped else head, "findings": findings,
+             "result": prior.get("result", {}) if skipped or unchanged else result}
+    if (skipped or unchanged) and prior.get("legacy_summary"):
+        state["legacy_summary"] = prior["legacy_summary"]
     body = build_summary(result, ctx, open_findings, resolved_count, state)
-    if ctx.get("summary_id"):
-        _call("PATCH", f"repos/{repo}/issues/comments/{ctx['summary_id']}", {"body": body})
+    if unchanged and prior.get("legacy_summary"):
+        body = prior["legacy_summary"] + "\n\nNo code changes since the last review. Previous results retained.\n\n" + render_state(state)
+    if summary_id:
+        _call("PATCH", f"repos/{repo}/issues/comments/{summary_id}", {"body": body})
     else:
         _call("POST", f"repos/{repo}/issues/{pr}/comments", {"body": body})
 
     # 4. Check run: informational. It is not added to branch protection, so it never blocks a merge.
-    if ctx.get("too_large"):
+    if ctx.get("incomplete"):
+        conclusion = "failure"
+    elif ctx.get("too_large"):
         conclusion = "neutral"
     elif any(f["severity"] in ("Blocker", "High") for f in open_findings):
         conclusion = "failure"
@@ -175,7 +219,7 @@ def publish(result, ctx):
         "status": "completed",
         "conclusion": conclusion,
         "output": {
-            "title": f"AI review: {len(open_findings)} open finding(s)",
+            "title": "AI review incomplete" if skipped else f"AI review: {len(open_findings)} open finding(s)",
             "summary": result.get("summary") or "See the AI review summary comment on this PR.",
         },
     })

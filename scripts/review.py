@@ -18,7 +18,7 @@ import subprocess
 
 import post
 from diff_utils import parse_diff_lines
-from ghapi import find_state, gh_api
+from ghapi import STATE_RE, find_state, gh_api
 
 PROMPTS = pathlib.Path(__file__).resolve().parent.parent / "prompts"
 MAX_DIFF_LINES = int(os.environ.get("MAX_DIFF_LINES", "3000"))
@@ -35,7 +35,13 @@ def load_prior(repo, pr):
         return None, json.loads(pathlib.Path(os.environ["PRIOR_STATE_FILE"]).read_text())
     if OFFLINE:
         return None, None
-    return find_state(gh_api(f"repos/{repo}/issues/{pr}/comments", paginate=True))
+    comments = gh_api(f"repos/{repo}/issues/{pr}/comments", paginate=True)
+    comment_id, state = find_state(comments)
+    if state is not None and "result" not in state and "pending" not in state:
+        # Older summaries did not persist the requirements as structured data.
+        body = next(c["body"] for c in comments if c["id"] == comment_id)
+        state.setdefault("legacy_summary", STATE_RE.sub("", body).strip())
+    return comment_id, state
 
 
 def compute_diff(prior):
@@ -66,7 +72,10 @@ def run_claude(prompt, system):
     proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=900)
     if proc.returncode != 0:
         raise RuntimeError(f"claude exited {proc.returncode}: {proc.stderr[-2000:]}")
-    return json.loads(proc.stdout).get("result", "")
+    envelope = json.loads(proc.stdout)
+    if not isinstance(envelope, dict) or envelope.get("is_error") or not isinstance(envelope.get("result"), str):
+        raise ValueError("Claude did not return a successful text result")
+    return envelope["result"]
 
 
 def extract_json(text):
@@ -80,6 +89,27 @@ def extract_json(text):
 
 def validate(data, valid_lines):
     """Normalize the model's output. Mark each finding as placed only if GitHub accepts an inline comment there."""
+    if not isinstance(data, dict) or not isinstance(data.get("summary"), str) or not data["summary"].strip():
+        raise ValueError("review must contain a non-empty summary")
+    for key in ("requirements", "new_findings", "previous_findings"):
+        if not isinstance(data.get(key), list):
+            raise ValueError(f"{key} must be an array")
+    schemas = {
+        "requirements": ("id", "text", "status", "evidence"),
+        "new_findings": ("path", "title", "body", "severity", "category"),
+        "previous_findings": ("id", "status"),
+    }
+    for key, fields in schemas.items():
+        for item in data[key]:
+            if not isinstance(item, dict) or any(not isinstance(item.get(f), str) or not item[f].strip() for f in fields):
+                raise ValueError(f"invalid entry in {key}")
+    for f in data["new_findings"]:
+        if type(f.get("line")) is not int or f["line"] < 1 or f["severity"] not in SEVERITIES or f["category"] not in CATEGORIES:
+            raise ValueError("invalid finding location, severity or category")
+    if any(r["status"] not in REQ_STATUSES for r in data["requirements"]):
+        raise ValueError("invalid requirement status")
+    if any(p["status"] not in PREV_STATUSES for p in data["previous_findings"]):
+        raise ValueError("invalid previous finding status")
     out = {"summary": str(data.get("summary", "")), "requirements": [],
            "new_findings": [], "previous_findings": []}
     for r in data.get("requirements", []):
@@ -137,6 +167,12 @@ def main():
     pr = os.environ.get("PR_NUMBER", "0")
     head = os.environ.get("HEAD_SHA", "local")
     summary_id, prior = load_prior(repo, pr)
+    if (prior or {}).get("pending"):
+        pending = prior["pending"]
+        recovery_ctx = {**pending["ctx"], "repo": repo, "pr": pr,
+                        "summary_id": summary_id, "prior": prior}
+        post.publish(pending["result"], recovery_ctx)
+        summary_id, prior = load_prior(repo, pr)
     diff, mode, rng = compute_diff(prior)
 
     ctx = {"repo": repo, "pr": pr, "head_sha": head, "range": rng, "mode": mode,
@@ -153,7 +189,8 @@ def main():
         post.publish({}, ctx)
         return
     if not diff.strip():
-        post.publish({"summary": "No code changes since the last review."}, ctx)
+        ctx["unchanged"] = True
+        post.publish((prior or {}).get("result", {"summary": "No code changes since the last review."}), ctx)
         return
 
     if os.environ.get("MOCK_REVIEW_FILE"):
@@ -166,13 +203,24 @@ def main():
         prompt = build_prompt(guidelines, jira_md, os.environ.get("PR_TITLE", ""),
                               os.environ.get("PR_BODY", ""), open_prev, diff)
         system = (PROMPTS / "system.md").read_text()
-        text = run_claude(prompt, system)
-        try:
-            raw = extract_json(text)
-        except ValueError:  # one retry, asking for JSON only
-            raw = extract_json(run_claude(prompt + "\n\nReturn valid JSON only.", system))
+        for attempt in range(2):
+            try:
+                raw = extract_json(run_claude(prompt, system))
+                validate(raw, parse_diff_lines(diff))
+                break
+            except (ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                if attempt == 1:
+                    ctx["incomplete"] = True
+                    post.publish({"summary": "AI review incomplete: no valid review response was received."}, ctx)
+                    raise RuntimeError("AI review incomplete") from exc
+                prompt += "\nReturn a complete JSON object matching every field in the output contract."
 
-    result = validate(raw, parse_diff_lines(diff))
+    try:
+        result = validate(raw, parse_diff_lines(diff))
+    except ValueError:
+        ctx["incomplete"] = True
+        post.publish({"summary": "AI review incomplete: invalid review response."}, ctx)
+        raise
     post.publish(result, ctx)
     placed = sum(1 for f in result["new_findings"] if f["placed"])
     print(f"Done: {len(result['new_findings'])} new finding(s), {placed} inline.")

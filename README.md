@@ -22,7 +22,7 @@ tests/              offline unit tests and fixtures
 ## Run the tests (no accounts needed)
 
 ```bash
-python3 -m python3 -m unittest discover -s tests -v
+python3 -m unittest discover -s tests -v
 ```
 
 ## Dry run of the whole pipeline (no GitHub, no API calls)
@@ -62,3 +62,11 @@ The output lists the inline review, the summary comment, and the check run, with
 - Jira text and PR text are treated as data, not instructions (see `prompts/system.md`).
 - Inline comments go only on lines that are in the diff. Anything else is listed in the summary.
 - Re-reviews look only at new commits, carry findings forward, and edit the existing summary instead of adding a new one.
+
+## Recovery and incomplete reviews
+
+- A diff above `MAX_DIFF_LINES` (default 3000) is skipped with a neutral check. It does not advance the last successfully reviewed commit, so later runs still include the skipped changes.
+- Model output must match the JSON contract. Invalid output is retried once; if it remains invalid, the run reports an incomplete review with a failed check and retains the previous checkpoint.
+- A rerun without code changes retains the previous requirements and findings. It does not post the findings again.
+- Before publishing, the summary stores a pending review result. If publishing is interrupted, the next run finishes that saved result before reviewing newer changes. Inline comments have stable hidden identifiers so accepted comments are reused even if the original API response was lost.
+- Keep the bot's summary comment and hidden markers intact: they hold recovery state. This recovery applies to new runs using these markers; historical interrupted runs without saved results cannot be reconstructed automatically.

@@ -76,18 +76,17 @@ class ParseTests(unittest.TestCase):
 
     def test_validate_normalizes_and_marks_placement(self):
         raw = {
+            "summary": "Review", "previous_findings": [],
             "new_findings": [
                 {"path": "app/users.py", "line": 2, "title": "t", "body": "b",
-                 "severity": "Bogus", "category": "bug"},
+                 "severity": "Low", "category": "bug"},
                 {"path": "app/users.py", "line": 99, "title": "t2", "body": "b",
                  "severity": "High", "category": "security"},
-                {"path": "app/users.py", "title": "no line", "body": "b",
-                 "severity": "High", "category": "bug"},
             ],
-            "requirements": [{"id": "R1", "text": "x", "status": "maybe"}],
+            "requirements": [{"id": "R1", "text": "x", "status": "cant_verify", "evidence": "unknown"}],
         }
         out = review.validate(raw, {"app/users.py": {1, 2, 3, 4}})
-        self.assertEqual(len(out["new_findings"]), 2)           # the line-less finding is dropped
+        self.assertEqual(len(out["new_findings"]), 2)
         self.assertEqual(out["new_findings"][0]["severity"], "Low")
         self.assertTrue(out["new_findings"][0]["placed"])
         self.assertFalse(out["new_findings"][1]["placed"])      # line 99 is outside the diff
@@ -203,7 +202,7 @@ class PublishTests(unittest.TestCase):
             out = self.run_publish(result, self.ctx())
 
         self.assertNotIn("Warning", out)
-        summary_call = next(c for c in calls if c[0] == "repos/me/sample/issues/1/comments")
+        summary_call = next(c for c in reversed(calls) if c[0] == "repos/me/sample/issues/1/comments")
         self.assertIn('"comment_id":123', summary_call[2]["body"])
         self.assertTrue(any(c[0] == "repos/me/sample/check-runs" for c in calls))
 
@@ -239,7 +238,7 @@ class PublishTests(unittest.TestCase):
                              self.ctx(prior={"findings": [old]}, summary_id=42))
         self.assertTrue(any(path.endswith("pulls/comments/101") and method == "PATCH"
                             for path, method, _ in calls))
-        summary = next(payload["body"] for path, _, payload in calls
+        summary = next(payload["body"] for path, _, payload in reversed(calls)
                        if path.endswith("issues/comments/42"))
         self.assertIn('"comment_id":101', summary)
         self.assertIn('"status":"resolved"', summary)
